@@ -1,0 +1,24 @@
+[
+  {
+    "modid": "bqmcp_bridge",
+    "name": "BQ MCP Bridge",
+    "description": "Exposes BetterQuesting data via a local HTTP API for MCP (Model Context Protocol) integration.",
+    "version": "${version}",
+    "mcversion": "${mcversion}",
+    "url": "",
+    "updateUrl": "",
+    "authorList": ["KiloCode"],
+    "credits": "",
+    "logoFile": "",
+    "screenshots": [],
+    "dependencies": [
+      {
+        "modid": "betterquesting",
+        "mandatory": true,
+        "version": "[2.4.0,)",
+        "ordering": "after",
+        "side": "CLIENT"
+      }
+    ]
+  }
+]
