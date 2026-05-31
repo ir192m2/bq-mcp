@@ -1,0 +1,20 @@
+pluginManagement {
+    repositories {
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = "GTNH Maven"
+                    url = "https://nexus.gtnewhorizons.com/repository/public/"
+                }
+            }
+            filter {
+                includeGroup("com.gtnewhorizons")
+                includeGroup("com.gtnewhorizons.retrofuturagradle")
+            }
+        }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "bq-mcp-bridge"

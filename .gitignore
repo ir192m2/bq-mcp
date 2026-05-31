@@ -1,0 +1,10 @@
+# Build
+mod/build/
+mod/.gradle/
+mod/run/
+mod/bin/
+server/node_modules/
+server/package-lock.json
+
+# BQ dependency (user must provide)
+mod/libs/
