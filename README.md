@@ -97,6 +97,9 @@ curl http://127.0.0.1:18733/api/health
 - **BQ Access:** Direct singleton access (`QuestDatabase.INSTANCE`, `QuestLineDatabase.INSTANCE`)
 - **Binding:** `127.0.0.1:18733` (localhost only)
 - **Read-only** — Phase 1, no write operations
+- **MCP Server:** TypeScript with `@modelcontextprotocol/sdk`, Zod schema validation
+- **Thread Safety:** BQ queries run on Minecraft server thread via `MinecraftServer.addScheduledTask()` + `CompletableFuture`
+- **Text Output:** MCP tools return concise parsed text (not raw JSON) to minimize token usage
 
 ## File Structure
 
@@ -106,13 +109,73 @@ bq-mcp/
 │   ├── build.gradle
 │   ├── settings.gradle
 │   ├── gradlew
+│   ├── libs/                          # Local BQ dependency (user-provided)
+│   │   └── BetterQuestingUnofficial-4.3.2.jar
 │   └── src/main/java/com/bqmcp/bridge/
-│       ├── BqMcpBridgeMod.java
-│       └── http/BqHttpBridgeServer.java
+│       ├── BqMcpBridgeMod.java        # @Mod entry, server lifecycle
+│       └── http/BqHttpBridgeServer.java  # 6 HTTP handlers
 ├── server/
 │   ├── package.json
 │   ├── tsconfig.json
-│   └── src/index.ts
+│   ├── dist/
+│   │   ├── index.js                   # MCP server (compiled)
+│   │   ├── fuzz-test.js               # HTTP API fuzz tests (101 tests)
+│   │   └── mcp-fuzz.js                # MCP protocol fuzz tests (42 tests)
+│   └── src/index.ts                   # MCP server source
 ├── .gitignore
 └── README.md
 ```
+
+## Testing
+
+### Fuzz Test Suites
+
+Two independent test suites cover the full stack:
+
+| Suite | Target | Tests | File |
+|-------|--------|-------|------|
+| HTTP fuzz | Java mod HTTP API (`:18733`) | 101 | `server/dist/fuzz-test.js` |
+| MCP protocol | MCP server via JSON-RPC stdio | 42 | `server/dist/mcp-fuzz.js` |
+
+**Run them:**
+```bash
+cd server
+node dist/fuzz-test.js    # HTTP API tests
+node dist/mcp-fuzz.js     # MCP protocol tests
+```
+
+### HTTP Fuzz Tests (101 tests)
+
+| Category | Tests | Coverage |
+|----------|-------|----------|
+| Health | 5 | Status, quest count, questline count, player name |
+| Questlines | 18 | Count, array, fields, known lines (Main Path, Adv Rocketry, Thermal) |
+| Questline detail | 14 | Valid lines, name, id, description, quest positions, non-existent lines |
+| Quest detail | 21 | Valid quests, name, icon, visibility, frame, logic, tasks, rewards, prerequisites, questline memberships |
+| Search | 13 | Case-insensitive, limit, partial match, no results, empty query |
+| Validate | 10 | Issue count, severity, message, per-line validation, non-existent lines |
+| Edge cases | 11 | Special chars, unicode, XSS, SQL injection, path traversal, null bytes, long queries, huge/negative IDs |
+| HTTP methods | 4 | POST/PUT/DELETE rejected with 405 |
+| Performance | 3 | 10 parallel searches, 5 concurrent mixed endpoints |
+| Data consistency | 6 | Health/questline count match, questline sum≈total, quest↔questline cross-reference |
+
+### MCP Protocol Tests (42 tests)
+
+| Category | Tests | Coverage |
+|----------|-------|----------|
+| Protocol | 2 | Initialize handshake, server info |
+| Tool discovery | 7 | All 6 tools advertised, names match |
+| Health | 3 | Non-error, text content, quest count |
+| Questlines | 5 | List all, known lines, non-existent lines |
+| Quest detail | 6 | Root quests, prerequisites, tasks, error handling |
+| Search | 5 | Valid queries, case-insensitive, no results |
+| Validate | 3 | Full validation, per-line, non-existent line |
+| Edge cases | 4 | XSS-like, long queries, extra params |
+| Concurrency | 1 | 4 rapid parallel calls |
+| Error handling | 2 | Non-existent quests/questlines return errors |
+
+### Known Limitations
+
+- Non-numeric IDs (e.g. `/questlines/abc`) return HTTP 400 instead of 404
+- Empty search queries return HTTP 400 (correct behavior)
+- URL-encoded `&` in search queries (`%26`) triggers query string splitting
