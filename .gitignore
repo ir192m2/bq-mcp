@@ -1,10 +1,19 @@
-# Build
+# MCP server
+server/node_modules/
+server/dist/
+server/package-lock.json
+
+# Forge mod
 mod/build/
 mod/.gradle/
-mod/run/
 mod/bin/
-server/node_modules/
-server/package-lock.json
+mod/out/
+mod/run/
+*.class
 
 # BQ dependency (user must provide)
 mod/libs/
+
+# OS
+.DS_Store
+Thumbs.db
