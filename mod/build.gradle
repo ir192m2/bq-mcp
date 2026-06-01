@@ -36,6 +36,15 @@ repositories {
 
 dependencies {
     implementation files("libs/BetterQuestingUnofficial-4.3.2.jar")
+    testImplementation "junit:junit:4.13.2"
+}
+
+test {
+    useJUnit()
+    testLogging {
+        events "passed", "skipped", "failed"
+        showStandardStreams = false
+    }
 }
 
 processResources {

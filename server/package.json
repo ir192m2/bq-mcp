@@ -1,13 +1,14 @@
 {
   "name": "bq-mcp-server",
-  "version": "1.0.0",
-  "description": "MCP server bridging KiloCode to BetterQuesting via an in-game mod",
+  "version": "1.2.0",
+  "description": "MCP server bridging KiloCode to BetterQuesting via an in-game mod. v1.2.0 adds production-grade write safety: dry-run by default, opt-in commit, automatic backups, audit log, post-write integrity check.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "node node_modules/esbuild/bin/esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:esbuild",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "test:fuzz": "node ../test/fuzz/master.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"

@@ -26,11 +26,26 @@ function text(s: string) {
   return { content: [{ type: "text" as const, text: s }] };
 }
 
-function err(e: unknown) {
+function isBridgeDown(e: unknown): boolean {
+  if (e && typeof e === "object") {
+    const cause = (e as { cause?: { code?: string } }).cause;
+    if (cause && (cause.code === "ECONNREFUSED" || cause.code === "ENOTFOUND")) return true;
+  }
   const msg = e instanceof Error ? e.message : String(e);
-  if (msg.includes("Bridge not reachable") || msg.includes("ECONNREFUSED") || msg.includes("abort")) {
+  return (
+    msg.includes("Bridge not reachable") ||
+    msg.includes("ECONNREFUSED") ||
+    msg.includes("ENOTFOUND") ||
+    msg.includes("fetch failed") ||
+    msg.includes("abort")
+  );
+}
+
+function err(e: unknown) {
+  if (isBridgeDown(e)) {
     return { isError: true, content: [{ type: "text" as const, text: "BQ Bridge not running. Launch Minecraft with bq-mcp-bridge mod." }] };
   }
+  const msg = e instanceof Error ? e.message : String(e);
   return { isError: true, content: [{ type: "text" as const, text: msg }] };
 }
 

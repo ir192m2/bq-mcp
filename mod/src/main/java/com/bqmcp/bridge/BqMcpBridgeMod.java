@@ -17,22 +17,25 @@ import org.apache.logging.log4j.Logger;
 public class BqMcpBridgeMod {
     public static final String MOD_ID = "bqmcp_bridge";
     public static final String NAME = "BQ MCP Bridge";
-    public static final String VERSION = "1.0.0";
+    public static final String VERSION = "1.2.0";
 
     private static final Logger LOG = LogManager.getLogger(MOD_ID);
+    private final BridgeConfig config = new BridgeConfig();
     private BqHttpBridgeServer httpServer;
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
-        LOG.info("BQ MCP Bridge pre-init");
+        config.resolve(event);
+        BqWriteSafety.init(event);
+        LOG.info("BQ MCP Bridge pre-init (port={}, version={})", config.getPort(), VERSION);
     }
 
     @Mod.EventHandler
     public void onServerStarted(FMLServerStartedEvent event) {
         try {
-            httpServer = new BqHttpBridgeServer();
+            httpServer = new BqHttpBridgeServer(config.getPort());
             httpServer.start();
-            LOG.info("BQ MCP Bridge HTTP server started on port {}", BqHttpBridgeServer.PORT);
+            LOG.info("BQ MCP Bridge HTTP server started on port {}", config.getPort());
         } catch (Exception e) {
             LOG.error("Failed to start BQ MCP Bridge HTTP server", e);
         }

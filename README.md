@@ -1,6 +1,8 @@
 # BQ MCP Bridge
 
-Bridges [BetterQuesting](https://github.com/CleanroomMC/BetterQuesting) (1.12.2) to [Model Context Protocol (MCP)](https://modelcontextprotocol.io), allowing AI assistants to read and validate quest data from a running game instance.
+Bridges [BetterQuesting](https://github.com/CleanroomMC/BetterQuesting) (1.12.2) to [Model Context Protocol (MCP)](https://modelcontextprotocol.io), allowing AI assistants to read, validate, and safely write quest data from a running game instance.
+
+**v1.2.x** — Production-grade write safety: dry-run by default, opt-in `commit=true`, automatic backups, audit log, post-write integrity check.
 
 ## Architecture
 
@@ -69,7 +71,9 @@ curl http://127.0.0.1:18733/api/health
 # {"status":"ok","quest_count":416,"questline_count":23}
 ```
 
-## MCP Tools
+## MCP Tools (v1.2.0 — 14 tools)
+
+### Read-only (6)
 
 | Tool | Description |
 |------|-------------|
@@ -80,7 +84,22 @@ curl http://127.0.0.1:18733/api/health
 | `bq_search_quests` | Search by name/description text |
 | `bq_validate` | Check for broken prereqs, missing tasks, overlaps, missing quest refs |
 
+### Write (8) — DRY-RUN by default, pass `commit=true` to apply
+
+| Tool | Description |
+|------|-------------|
+| `bq_move_quest` | Move a quest to new (x, y) position |
+| `bq_set_prerequisites` | Set prerequisite quest IDs |
+| `bq_update_quest` | Update name, description, icon |
+| `bq_create_quest` | Create a new quest in a quest line |
+| `bq_delete_quest` | Delete a quest (removes from all questlines + prereq lists) |
+| `bq_reorder_questline` | Change a quest line's display order |
+| `bq_create_questline` | Create a new quest line |
+| `bq_save_questbook` | Force-save questbook to disk |
+
 ## HTTP API
+
+### Read endpoints
 
 | Endpoint | Method | Params | Description |
 |----------|--------|--------|-------------|
@@ -91,12 +110,41 @@ curl http://127.0.0.1:18733/api/health
 | `/quests` | GET | `q`, `limit`, `offset` | Search quests |
 | `/validate` | GET | `line_id` | Validate structure |
 
+### Write endpoints (all POST, body = JSON)
+
+| Endpoint | Body | Description |
+|----------|------|-------------|
+| `/write/quests/move` | `{quest_id, line_id, pos_x, pos_y, commit}` | Move quest |
+| `/write/quests/prerequisites` | `{quest_id, prerequisites[], commit}` | Set prereqs |
+| `/write/quests/update` | `{quest_id, name?, description?, icon?, commit}` | Update quest |
+| `/write/quests/create` | `{quest_id, line_id, name?, description?, pos_x?, pos_y?, commit}` | Create quest |
+| `/write/quests/delete` | `{quest_id, commit}` | Delete quest |
+| `/write/questlines/reorder` | `{line_id, order, commit}` | Reorder questline |
+| `/write/questlines/create` | `{line_id, name?, description?, commit}` | Create questline |
+| `/write/save` | `{}` | Force-save to disk |
+
+## Safety Model (v1.2.0)
+
+**All write tools are DRY-RUN by default.** Pass `commit: true` to actually apply.
+
+When `commit=true`:
+1. **Pre-write backup**: `config/betterquesting/DefaultQuests/` is copied to `bqmcp/backups/<requestId>/`
+2. **Write executes** on the game thread
+3. **Post-write integrity check**: verifies quest/questline database consistency
+4. **`markDirty()`** flags the BQ databases for save on next world save
+5. **Audit log** records BEGIN / DRY_RUN / COMMIT / BACKUP_FAIL / INTEGRITY_FAIL / ABORT
+
+**In-memory only**: Changes are NOT persisted to disk until you call `bq_save_questbook` or Minecraft auto-saves the world. To discard changes, quit the world without saving.
+
+**Audit log**: `bqmcp/audit.log` (JSONL format, one event per line)
+**Backups**: `bqmcp/backups/<requestId>/`
+
 ## Technical Details
 
 - **HTTP:** Java `com.sun.net.httpserver.HttpServer`
 - **BQ Access:** Direct singleton access (`QuestDatabase.INSTANCE`, `QuestLineDatabase.INSTANCE`)
 - **Binding:** `127.0.0.1:18733` (localhost only)
-- **Read-only** — Phase 1, no write operations
+- **Read + Write** — v1.2.0 adds production-grade write safety
 - **MCP Server:** TypeScript with `@modelcontextprotocol/sdk`, Zod schema validation
 - **Thread Safety:** BQ queries run on Minecraft server thread via `MinecraftServer.addScheduledTask()` + `CompletableFuture`
 - **Text Output:** MCP tools return concise parsed text (not raw JSON) to minimize token usage
@@ -113,69 +161,53 @@ bq-mcp/
 │   │   └── BetterQuestingUnofficial-4.3.2.jar
 │   └── src/main/java/com/bqmcp/bridge/
 │       ├── BqMcpBridgeMod.java        # @Mod entry, server lifecycle
-│       └── http/BqHttpBridgeServer.java  # 6 HTTP handlers
+│       ├── BqWriteApi.java            # 8 write methods (dry-run + commit)
+│       ├── BqWriteSafety.java         # backup, audit, integrity wrapper
+│       └── http/BqHttpBridgeServer.java  # 14 HTTP handlers (6 read + 8 write)
 ├── server/
 │   ├── package.json
 │   ├── tsconfig.json
-│   ├── dist/
-│   │   ├── index.js                   # MCP server (compiled)
-│   │   ├── fuzz-test.js               # HTTP API fuzz tests (101 tests)
-│   │   └── mcp-fuzz.js                # MCP protocol fuzz tests (42 tests)
+│   ├── dist/index.js                  # MCP server (compiled)
 │   └── src/index.ts                   # MCP server source
+├── test/
+│   └── fuzz/                          # Fuzz test suite (271 cases)
+│       ├── shared/                    # harness, state integration
+│       ├── bq/                        # HTTP + MCP fuzzers
+│       ├── master.mjs                 # runs all suites
+│       └── README.md
 ├── .gitignore
 └── README.md
 ```
 
 ## Testing
 
-### Fuzz Test Suites
+### Fuzz Test Suite (271 cases)
 
-Two independent test suites cover the full stack:
-
-| Suite | Target | Tests | File |
-|-------|--------|-------|------|
-| HTTP fuzz | Java mod HTTP API (`:18733`) | 101 | `server/dist/fuzz-test.js` |
-| MCP protocol | MCP server via JSON-RPC stdio | 42 | `server/dist/mcp-fuzz.js` |
-
-**Run them:**
 ```bash
 cd server
-node dist/fuzz-test.js    # HTTP API tests
-node dist/mcp-fuzz.js     # MCP protocol tests
+npm run test:fuzz
 ```
 
-### HTTP Fuzz Tests (101 tests)
+| Suite | Cases | Target |
+|-------|-------|--------|
+| BQ HTTP | 152 | Java mod HTTP API (`:18733`) |
+| BQ MCP | 96 | MCP server via JSON-RPC stdio |
+| State Integration | 23 | Cross-bridge workflow |
 
-| Category | Tests | Coverage |
-|----------|-------|----------|
-| Health | 5 | Status, quest count, questline count, player name |
-| Questlines | 18 | Count, array, fields, known lines (Main Path, Adv Rocketry, Thermal) |
-| Questline detail | 14 | Valid lines, name, id, description, quest positions, non-existent lines |
-| Quest detail | 21 | Valid quests, name, icon, visibility, frame, logic, tasks, rewards, prerequisites, questline memberships |
-| Search | 13 | Case-insensitive, limit, partial match, no results, empty query |
-| Validate | 10 | Issue count, severity, message, per-line validation, non-existent lines |
-| Edge cases | 11 | Special chars, unicode, XSS, SQL injection, path traversal, null bytes, long queries, huge/negative IDs |
-| HTTP methods | 4 | POST/PUT/DELETE rejected with 405 |
-| Performance | 3 | 10 parallel searches, 5 concurrent mixed endpoints |
-| Data consistency | 6 | Health/questline count match, questline sum≈total, quest↔questline cross-reference |
+See `test/fuzz/README.md` for details, individual suite runners, and bug history.
 
-### MCP Protocol Tests (42 tests)
+### Unit Tests
 
-| Category | Tests | Coverage |
-|----------|-------|----------|
-| Protocol | 2 | Initialize handshake, server info |
-| Tool discovery | 7 | All 6 tools advertised, names match |
-| Health | 3 | Non-error, text content, quest count |
-| Questlines | 5 | List all, known lines, non-existent lines |
-| Quest detail | 6 | Root quests, prerequisites, tasks, error handling |
-| Search | 5 | Valid queries, case-insensitive, no results |
-| Validate | 3 | Full validation, per-line, non-existent line |
-| Edge cases | 4 | XSS-like, long queries, extra params |
-| Concurrency | 1 | 4 rapid parallel calls |
-| Error handling | 2 | Non-existent quests/questlines return errors |
+```bash
+cd mod
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew test
+```
 
-### Known Limitations
+25 tests covering `BridgeConfig` and `BqWriteSafety`.
+
+## Known Limitations
 
 - Non-numeric IDs (e.g. `/questlines/abc`) return HTTP 400 instead of 404
 - Empty search queries return HTTP 400 (correct behavior)
 - URL-encoded `&` in search queries (`%26`) triggers query string splitting
+- Bridge always attempts backup before `commit=true` write, even for invalid inputs (safe but slightly wasteful)

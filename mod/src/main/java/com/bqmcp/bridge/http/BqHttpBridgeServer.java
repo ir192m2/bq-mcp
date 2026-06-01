@@ -17,15 +17,21 @@ import com.sun.net.httpserver.HttpHandler;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
-import net.minecraft.client.Minecraft;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ResourceLocation;
+import net.minecraftforge.fml.common.FMLCommonHandler;
+
+import com.bqmcp.bridge.BqWriteApi;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
@@ -40,25 +46,42 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class BqHttpBridgeServer {
-    public static final int PORT = 18733;
+    public static final int DEFAULT_PORT = 18733;
 
     private static final Logger LOG = LogManager.getLogger("bqmcp_bridge");
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
+    private final int port;
     private HttpServer server;
     private final ExecutorService httpThreadPool = Executors.newFixedThreadPool(4);
 
+    public BqHttpBridgeServer(int port) {
+        this.port = port;
+    }
+
+    public int getPort() {
+        return port;
+    }
+
     public void start() throws Exception {
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", PORT), 0);
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         server.createContext("/api/health", new HealthHandler());
         server.createContext("/api/questlines", new QuestLinesHandler());
         server.createContext("/api/questlines/", new QuestLineDetailHandler());
         server.createContext("/api/quests/", new QuestDetailHandler());
         server.createContext("/api/quests", new QuestSearchHandler());
         server.createContext("/api/validate", new ValidateHandler());
+        server.createContext("/api/write/quests/move", new QuestMoveHandler());
+        server.createContext("/api/write/quests/prerequisites", new QuestPrereqsHandler());
+        server.createContext("/api/write/quests/update", new QuestUpdateHandler());
+        server.createContext("/api/write/quests/create", new QuestCreateHandler());
+        server.createContext("/api/write/quests/delete", new QuestDeleteHandler());
+        server.createContext("/api/write/questlines/reorder", new QuestlineReorderHandler());
+        server.createContext("/api/write/questlines/create", new QuestlineCreateHandler());
+        server.createContext("/api/write/save", new SaveHandler());
         server.setExecutor(httpThreadPool);
         server.start();
-        LOG.info("BQ HTTP Bridge started on port {}", PORT);
+        LOG.info("BQ HTTP Bridge started on port {}", port);
     }
 
     public void stop() {
@@ -107,6 +130,19 @@ public class BqHttpBridgeServer {
         return params;
     }
 
+    private static int parseBoundedInt(String raw, String name, int min, int max) {
+        if (raw == null || raw.isEmpty()) throw new IllegalArgumentException("Missing " + name);
+        int v;
+        try {
+            v = Integer.parseInt(raw);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Invalid " + name + " value: not a number");
+        }
+        if (v < min) throw new IllegalArgumentException("Invalid " + name + " value: must be >= " + min);
+        if (v > max) return max;
+        return v;
+    }
+
     private static <T> T qp(IQuest quest, IPropertyType<T> prop) {
         return quest.getProperty(prop, prop.getDefault());
     }
@@ -135,8 +171,10 @@ public class BqHttpBridgeServer {
             r.put("quest_count", QuestDatabase.INSTANCE.getEntries().size());
             r.put("questline_count", QuestLineDatabase.INSTANCE.getEntries().size());
             try {
-                Minecraft mc = Minecraft.getMinecraft();
-                if (mc.player != null) r.put("player", mc.player.getName());
+                net.minecraft.server.MinecraftServer srv = FMLCommonHandler.instance().getMinecraftServerInstance();
+                if (srv != null && !srv.getPlayerList().getPlayers().isEmpty()) {
+                    r.put("player", srv.getPlayerList().getPlayers().get(0).getName());
+                }
             } catch (Exception ignored) {}
             sendJson(ex, r);
         }
@@ -281,9 +319,16 @@ public class BqHttpBridgeServer {
             if (!"GET".equals(ex.getRequestMethod())) { sendError(ex, 405, "Method not allowed"); return; }
             Map<String, String> params = parseQuery(ex.getRequestURI().getQuery());
             String query = params.getOrDefault("q", "").toLowerCase(Locale.ROOT);
-            int limit = Math.min(Integer.parseInt(params.getOrDefault("limit", "50")), 500);
-            int offset = Integer.parseInt(params.getOrDefault("offset", "0"));
             if (query.isEmpty()) { sendError(ex, 400, "Missing query parameter 'q'"); return; }
+            int limit;
+            int offset;
+            try {
+                limit = parseBoundedInt(params.getOrDefault("limit", "50"), "limit", 1, 500);
+                offset = parseBoundedInt(params.getOrDefault("offset", "0"), "offset", 0, Integer.MAX_VALUE);
+            } catch (IllegalArgumentException e) {
+                sendError(ex, 400, e.getMessage());
+                return;
+            }
 
             List<Map<String, Object>> matched = new ArrayList<Map<String, Object>>();
             for (DBEntry<IQuest> entry : QuestDatabase.INSTANCE.getEntries()) {
@@ -386,6 +431,246 @@ public class BqHttpBridgeServer {
             r.put("issues", issues);
             r.put("status", issues.isEmpty() ? "ok" : "issues_found");
             sendJson(ex, r);
+        }
+    }
+
+    // ===== WRITE HANDLERS (Phase 2) =====
+
+    private static JsonObject readJsonBody(HttpExchange ex) throws IOException {
+        try (InputStream is = ex.getRequestBody()) {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = is.read(buf)) > 0) baos.write(buf, 0, n);
+            String body = new String(baos.toByteArray(), StandardCharsets.UTF_8);
+            if (body.isEmpty()) return new JsonObject();
+            return new JsonParser().parse(body).getAsJsonObject();
+        } catch (Exception e) {
+            throw new IOException("Invalid JSON body: " + e.getMessage());
+        }
+    }
+
+    private static int requireInt(JsonObject obj, String name) throws IOException {
+        if (!obj.has(name) || obj.get(name).isJsonNull()) {
+            throw new IOException("Missing required field: " + name);
+        }
+        if (!obj.get(name).isJsonPrimitive() || !obj.get(name).getAsJsonPrimitive().isNumber()) {
+            throw new IOException("Field '" + name + "' must be an integer");
+        }
+        try {
+            return obj.get(name).getAsInt();
+        } catch (NumberFormatException e) {
+            throw new IOException("Field '" + name + "' is not a valid integer");
+        }
+    }
+
+    private static int optInt(JsonObject obj, String name, int defaultVal) throws IOException {
+        if (!obj.has(name) || obj.get(name).isJsonNull()) return defaultVal;
+        if (!obj.get(name).isJsonPrimitive() || !obj.get(name).getAsJsonPrimitive().isNumber()) {
+            throw new IOException("Field '" + name + "' must be an integer");
+        }
+        try {
+            return obj.get(name).getAsInt();
+        } catch (NumberFormatException e) {
+            throw new IOException("Field '" + name + "' is not a valid integer");
+        }
+    }
+
+    private static String optString(JsonObject obj, String name) throws IOException {
+        if (!obj.has(name) || obj.get(name).isJsonNull()) return null;
+        if (!obj.get(name).isJsonPrimitive() || !obj.get(name).getAsJsonPrimitive().isString()) {
+            throw new IOException("Field '" + name + "' must be a string");
+        }
+        return obj.get(name).getAsString();
+    }
+
+    private static int[] optIntArray(JsonObject obj, String name) throws IOException {
+        if (!obj.has(name) || obj.get(name).isJsonNull()) return new int[0];
+        if (!obj.get(name).isJsonArray()) {
+            throw new IOException("Field '" + name + "' must be an array of integers");
+        }
+        com.google.gson.JsonArray arr = obj.getAsJsonArray(name);
+        int[] result = new int[arr.size()];
+        for (int i = 0; i < arr.size(); i++) {
+            if (!arr.get(i).isJsonPrimitive() || !arr.get(i).getAsJsonPrimitive().isNumber()) {
+                throw new IOException("Field '" + name + "[" + i + "]' must be an integer");
+            }
+            try {
+                result[i] = arr.get(i).getAsInt();
+            } catch (NumberFormatException e) {
+                throw new IOException("Field '" + name + "[" + i + "]' is not a valid integer");
+            }
+        }
+        return result;
+    }
+
+    private static boolean readCommit(JsonObject obj) {
+        if (!obj.has("commit") || obj.get("commit").isJsonNull()) return false;
+        return obj.get("commit").getAsBoolean();
+    }
+
+    private static void writeResult(HttpExchange ex, Map<String, Object> result) throws IOException {
+        if (result.containsKey("error")) {
+            String msg = String.valueOf(result.get("error"));
+            sendError(ex, 400, msg);
+            return;
+        }
+        sendJson(ex, result);
+    }
+
+    static class QuestMoveHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            if (!"POST".equals(ex.getRequestMethod())) { sendError(ex, 405, "Method not allowed"); return; }
+            try {
+                JsonObject body = readJsonBody(ex);
+                int questId = requireInt(body, "quest_id");
+                int lineId = requireInt(body, "line_id");
+                int posX = requireInt(body, "pos_x");
+                int posY = requireInt(body, "pos_y");
+                boolean commit = readCommit(body);
+                writeResult(ex, BqWriteApi.moveQuest(questId, lineId, posX, posY, commit));
+            } catch (IOException e) {
+                sendError(ex, 400, e.getMessage());
+            } catch (RuntimeException e) {
+                LOG.error("Unhandled write error in moveQuest", e);
+                sendError(ex, 500, "Write failed: " + e.getMessage());
+            }
+        }
+    }
+
+    static class QuestPrereqsHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            if (!"POST".equals(ex.getRequestMethod())) { sendError(ex, 405, "Method not allowed"); return; }
+            try {
+                JsonObject body = readJsonBody(ex);
+                int questId = requireInt(body, "quest_id");
+                int[] prereqs = optIntArray(body, "prerequisites");
+                boolean commit = readCommit(body);
+                writeResult(ex, BqWriteApi.setPrerequisites(questId, prereqs, commit));
+            } catch (IOException e) {
+                sendError(ex, 400, e.getMessage());
+            } catch (RuntimeException e) {
+                LOG.error("Unhandled write error in setPrerequisites", e);
+                sendError(ex, 500, "Write failed: " + e.getMessage());
+            }
+        }
+    }
+
+    static class QuestUpdateHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            if (!"POST".equals(ex.getRequestMethod())) { sendError(ex, 405, "Method not allowed"); return; }
+            try {
+                JsonObject body = readJsonBody(ex);
+                int questId = requireInt(body, "quest_id");
+                String name = optString(body, "name");
+                String description = optString(body, "description");
+                String icon = optString(body, "icon");
+                boolean commit = readCommit(body);
+                writeResult(ex, BqWriteApi.updateQuest(questId, name, description, icon, commit));
+            } catch (IOException e) {
+                sendError(ex, 400, e.getMessage());
+            } catch (RuntimeException e) {
+                LOG.error("Unhandled write error in updateQuest", e);
+                sendError(ex, 500, "Write failed: " + e.getMessage());
+            }
+        }
+    }
+
+    static class QuestCreateHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            if (!"POST".equals(ex.getRequestMethod())) { sendError(ex, 405, "Method not allowed"); return; }
+            try {
+                JsonObject body = readJsonBody(ex);
+                int questId = requireInt(body, "quest_id");
+                int lineId = requireInt(body, "line_id");
+                int posX = optInt(body, "pos_x", 0);
+                int posY = optInt(body, "pos_y", 0);
+                String name = optString(body, "name");
+                String description = optString(body, "description");
+                boolean commit = readCommit(body);
+                writeResult(ex, BqWriteApi.createQuest(lineId, questId, name, description, posX, posY, commit));
+            } catch (IOException e) {
+                sendError(ex, 400, e.getMessage());
+            } catch (RuntimeException e) {
+                LOG.error("Unhandled write error in createQuest", e);
+                sendError(ex, 500, "Write failed: " + e.getMessage());
+            }
+        }
+    }
+
+    static class QuestDeleteHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            if (!"DELETE".equals(ex.getRequestMethod()) && !"POST".equals(ex.getRequestMethod())) {
+                sendError(ex, 405, "Method not allowed"); return;
+            }
+            try {
+                JsonObject body = readJsonBody(ex);
+                int questId = requireInt(body, "quest_id");
+                boolean commit = readCommit(body);
+                writeResult(ex, BqWriteApi.deleteQuest(questId, commit));
+            } catch (IOException e) {
+                sendError(ex, 400, e.getMessage());
+            } catch (RuntimeException e) {
+                LOG.error("Unhandled write error in deleteQuest", e);
+                sendError(ex, 500, "Write failed: " + e.getMessage());
+            }
+        }
+    }
+
+    static class QuestlineReorderHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            if (!"POST".equals(ex.getRequestMethod())) { sendError(ex, 405, "Method not allowed"); return; }
+            try {
+                JsonObject body = readJsonBody(ex);
+                int lineId = requireInt(body, "line_id");
+                int order = requireInt(body, "order");
+                boolean commit = readCommit(body);
+                writeResult(ex, BqWriteApi.reorderQuestline(lineId, order, commit));
+            } catch (IOException e) {
+                sendError(ex, 400, e.getMessage());
+            } catch (RuntimeException e) {
+                LOG.error("Unhandled write error in reorderQuestline", e);
+                sendError(ex, 500, "Write failed: " + e.getMessage());
+            }
+        }
+    }
+
+    static class QuestlineCreateHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            if (!"POST".equals(ex.getRequestMethod())) { sendError(ex, 405, "Method not allowed"); return; }
+            try {
+                JsonObject body = readJsonBody(ex);
+                int lineId = requireInt(body, "line_id");
+                String name = optString(body, "name");
+                String description = optString(body, "description");
+                boolean commit = readCommit(body);
+                writeResult(ex, BqWriteApi.createQuestline(lineId, name, description, commit));
+            } catch (IOException e) {
+                sendError(ex, 400, e.getMessage());
+            } catch (RuntimeException e) {
+                LOG.error("Unhandled write error in createQuestline", e);
+                sendError(ex, 500, "Write failed: " + e.getMessage());
+            }
+        }
+    }
+
+    static class SaveHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            if (!"POST".equals(ex.getRequestMethod())) { sendError(ex, 405, "Method not allowed"); return; }
+            try {
+                writeResult(ex, BqWriteApi.saveToDisk());
+            } catch (RuntimeException e) {
+                LOG.error("Unhandled write error in saveToDisk", e);
+                sendError(ex, 500, "Save failed: " + e.getMessage());
+            }
         }
     }
 }
