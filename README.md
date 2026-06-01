@@ -4,10 +4,15 @@ Bridges [BetterQuesting](https://github.com/CleanroomMC/BetterQuesting) (1.12.2)
 
 **v1.2.x** — Production-grade write safety: dry-run by default, opt-in `commit=true`, automatic backups, audit log, post-write integrity check.
 
+**v1.3.x** — Offline SQLite + FTS5 questbook graph engine. Build it from a live world, then query 416+ quests, 400+ prereqs, and 23 questlines without the JVM running.
+
 ## Architecture
 
 ```
-KiloCode ──MCP stdio──> bq-mcp-server (TypeScript) ──HTTP 127.0.0.1:18733──> Minecraft Client (BQ mod)
+Live mode:    KiloCode ──MCP stdio──> bq-mcp-server ──HTTP :18733──> Minecraft (Forge mod + BQ)
+
+Offline mode: KiloCode ──MCP stdio──> bq-mcp-server ──SQLite──> bq-graph/questgraph.db
+                                                  (10 bq_graph_* tools, no JVM needed)
 ```
 
 ## Setup
@@ -17,7 +22,7 @@ KiloCode ──MCP stdio──> bq-mcp-server (TypeScript) ──HTTP 127.0.0.1:
 - Minecraft 1.12.2 with Forge
 - BetterQuesting Unofficial 4.3.2+
 - JDK 21 (for Gradle)
-- Node.js 18+ (for MCP server)
+- Node.js 26+ (for MCP server — uses built-in `node:sqlite` with FTS5)
 
 ### 1. Build the Mod
 
@@ -51,7 +56,10 @@ npm run build
 
 ### 3. Configure KiloCode
 
-Add to `.kilo/kilo.jsonc`:
+> **See [`docs/MCP-SETUP.md`](../../docs/MCP-SETUP.md)** for the full
+> `kilo.json` snippet that registers both `bq-mcp` and `jei-mcp` together.
+
+Quickstart (this repo only):
 
 ```jsonc
 "bq-mcp": {
@@ -159,29 +167,54 @@ bq-mcp/
 │   ├── gradlew
 │   ├── libs/                          # Local BQ dependency (user-provided)
 │   │   └── BetterQuestingUnofficial-4.3.2.jar
-│   └── src/main/java/com/bqmcp/bridge/
-│       ├── BqMcpBridgeMod.java        # @Mod entry, server lifecycle
-│       ├── BqWriteApi.java            # 8 write methods (dry-run + commit)
-│       ├── BqWriteSafety.java         # backup, audit, integrity wrapper
-│       └── http/BqHttpBridgeServer.java  # 14 HTTP handlers (6 read + 8 write)
+│   └── src/
+│       ├── main/java/com/bqmcp/bridge/
+│       │   ├── BqMcpBridgeMod.java        # @Mod entry, server lifecycle
+│       │   ├── BqMcpBridgePlugin.java     # plugin metadata
+│       │   ├── BridgeConfig.java          # port resolution, testable
+│       │   ├── BqWriteApi.java            # 8 write methods (dry-run + commit)
+│       │   ├── BqWriteSafety.java         # backup, audit, integrity wrapper
+│       │   └── http/
+│       │       └── BqHttpBridgeServer.java  # 14 HTTP handlers (6 read + 8 write)
+│       └── test/java/com/bqmcp/bridge/
+│           ├── BridgeConfigTest.java      # 17 unit tests
+│           └── BqWriteSafetyTest.java     # 8 unit tests
 ├── server/
 │   ├── package.json
 │   ├── tsconfig.json
-│   ├── dist/index.js                  # MCP server (compiled)
-│   └── src/index.ts                   # MCP server source
+│   ├── dist/                          # Built output (gitignored)
+│   │   └── index.js                   # MCP server (24 tools)
+│   ├── scripts/
+│   │   └── export-graph.mjs           # Live-bridge → questbook.json exporter
+│   └── src/
+│       ├── index.ts                   # MCP server source
+│       ├── graph/                     # SQLite questbook graph engine (offline)
+│       │   ├── db.js                  # SQLite connection, schema, FTS5
+│       │   ├── search.js              # FTS5 escape
+│       │   ├── traversal.js           # BFS, path, cycle detection
+│       │   ├── query.js               # high-level read queries
+│       │   └── import.js              # questbook.json → SQLite importer
+│       └── test/
+│           └── graph-smoke.mjs        # 23 engine smoke tests
 ├── test/
-│   └── fuzz/                          # Fuzz test suite (271 cases)
+│   └── fuzz/                          # Fuzz test suite (274 cases)
 │       ├── shared/                    # harness, state integration
 │       ├── bq/                        # HTTP + MCP fuzzers
 │       ├── master.mjs                 # runs all suites
 │       └── README.md
+├── bq-graph/                          # Generated graph data (gitignored)
+│   ├── questbook.json                 # JSON snapshot from live bridge
+│   └── questgraph.db                  # SQLite + FTS5
+├── SAFETY.md                          # In-memory safety model
+├── CHANGELOG.md
+├── LICENSE                            # MIT
 ├── .gitignore
 └── README.md
 ```
 
 ## Testing
 
-### Fuzz Test Suite (271 cases)
+### Fuzz Test Suite (274 cases)
 
 ```bash
 cd server
@@ -191,10 +224,10 @@ npm run test:fuzz
 | Suite | Cases | Target |
 |-------|-------|--------|
 | BQ HTTP | 152 | Java mod HTTP API (`:18733`) |
-| BQ MCP | 96 | MCP server via JSON-RPC stdio |
+| BQ MCP | 99 | MCP server via JSON-RPC stdio |
 | State Integration | 23 | Cross-bridge workflow |
 
-See `test/fuzz/README.md` for details, individual suite runners, and bug history.
+See `test/fuzz/README.md` for details, individual suite runners, and bug history (7 bugs found and fixed before v1.0.0).
 
 ### Unit Tests
 
@@ -205,9 +238,90 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk ./gradlew test
 
 25 tests covering `BridgeConfig` and `BqWriteSafety`.
 
+### Graph Engine Smoke Tests
+
+```bash
+cd server
+node test/graph-smoke.mjs
+```
+
+23 tests covering `stats`, `listQuestlines`, `getQuestline`, `getQuest`, `searchQuests`, `getDependencies`, `getBlockersFull`, `depth`, `findPath`, `detectCycles`.
+
+## Offline Questbook Graph (v1.3.0)
+
+The BQ graph engine mirrors the JEI recipe graph: snapshot the live
+questbook to JSON, build a SQLite + FTS5 database, then query 24 MCP
+tools (14 live + 10 offline) without the JVM.
+
+```bash
+# 1. Snapshot the live questbook (requires MC + BQ bridge running)
+cd server
+npm run graph:export
+#   writes bq-graph/questbook.json (~0.7 MB for 416 quests)
+
+# 2. Build the offline database
+npm run graph:import
+#   writes bq-graph/questgraph.db
+
+# 3. Run the MCP server — bq_graph_* tools now work offline
+npm start
+```
+
+### Current Graph Stats (NITRO modpack snapshot)
+
+| Metric | Value |
+|--------|-------|
+| Questlines | 23 |
+| Quests | 416 |
+| Tasks | 416 |
+| Rewards | 1 |
+| Prereqs | 405 |
+| Questline memberships | 416 |
+
+Use `bq_graph_health` after a fresh export + import to see the current numbers for your modpack.
+
+### Offline MCP Tools (10)
+
+All `bq_graph_*` tools work without the BQ bridge running. They read directly from `bq-graph/questgraph.db`.
+
+| Tool | Description |
+|------|-------------|
+| `bq_graph_health` | Counts, generation timestamp, source player |
+| `bq_graph_list_questlines` | All quest lines |
+| `bq_graph_get_questline` | Quest line + member quests with positions |
+| `bq_graph_get_quest` | Full quest (tasks, rewards, prereqs, memberships) |
+| `bq_graph_search_quests` | FTS5 search across quest name + description |
+| `bq_graph_get_dependencies` | What does this quest unlock? (reverse BFS over prereqs) |
+| `bq_graph_get_blockers` | What does this quest depend on? (forward BFS over prereqs) |
+| `bq_graph_find_path` | Prereq chain from one quest to another |
+| `bq_graph_detect_cycles` | Circular prereq chains |
+| `bq_graph_depth` | Longest prereq-chain depth for a quest |
+
+The graph schema (`src/graph/db.js`) models the questbook as:
+
+- `quests` — name, description, frame, visibility, flags, counts
+- `questlines` — name, description, order
+- `tasks` — per-quest, (seq, task_id, quest_id, type, name)
+- `rewards` — per-quest, (seq, reward_id, quest_id, type, name)
+- `prereqs` — (quest_id, prereq_id, type) — the prereq DAG
+- `questline_membership` — many-to-many with positions
+- `quests_fts` — FTS5 over quest name + description
+- `meta` — generated_at, bridge_player, counts
+
+**Phantoms**: any `prereq` pointing to a quest not in any questline
+(deletion) is materialized as a `(phantom quest N)` row so the DAG
+stays intact. Use `bq_graph_search_quests` then `bq_graph_get_quest`
+to inspect.
+
 ## Known Limitations
 
 - Non-numeric IDs (e.g. `/questlines/abc`) return HTTP 400 instead of 404
 - Empty search queries return HTTP 400 (correct behavior)
 - URL-encoded `&` in search queries (`%26`) triggers query string splitting
 - Bridge always attempts backup before `commit=true` write, even for invalid inputs (safe but slightly wasteful)
+- Only 1 reward exposed in the NITRO snapshot — many BQ reward types (Item, Choice, XP, Command) are not returned by the current `/api/quests/{id}` response
+
+## Related
+
+- **[`jei-mcp`](../jei-mcp/)** — companion repo with the same architecture for JEI (recipe graph + offline engine)
+- **[`docs/MCP-SETUP.md`](../docs/MCP-SETUP.md)** — shared setup guide (kilo.json, ports, prerequisites)

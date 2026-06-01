@@ -1,0 +1,7 @@
+questgraph.db
+questgraph.db-wal
+questgraph.db-shm
+questbook.json
+questbook.json.bak
+questbook.json.tmp
+reports/

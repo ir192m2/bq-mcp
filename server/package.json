@@ -8,7 +8,9 @@
     "build": "node node_modules/esbuild/bin/esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:esbuild",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "test:fuzz": "node ../test/fuzz/master.mjs"
+    "test:fuzz": "node ../test/fuzz/master.mjs",
+    "graph:export": "node scripts/export-graph.mjs",
+    "graph:import": "node src/graph/import.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"

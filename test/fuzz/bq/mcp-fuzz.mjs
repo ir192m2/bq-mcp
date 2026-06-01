@@ -63,12 +63,15 @@ r.section('1. Initialize / list tools');
   const r2 = await nextResp();
   const tools = r2.msg?.result?.tools || [];
   r.case('tools/list returns array', Array.isArray(tools), `n=${tools.length}`, 'init');
-  r.case('has 14 tools (6 read + 8 write)', tools.length === 14, `n=${tools.length}`, 'init');
+  r.case('has 24 tools (6 read + 8 write + 10 graph)', tools.length === 24, `n=${tools.length}`, 'init');
   const names = tools.map(t => t.name).sort();
   r.case('has bq_health', names.includes('bq_health'), '', 'init');
   r.case('has bq_create_quest', names.includes('bq_create_quest'), '', 'init');
   r.case('has bq_delete_quest', names.includes('bq_delete_quest'), '', 'init');
   r.case('has bq_save_questbook', names.includes('bq_save_questbook'), '', 'init');
+  r.case('has bq_graph_health', names.includes('bq_graph_health'), '', 'init');
+  r.case('has bq_graph_get_dependencies', names.includes('bq_graph_get_dependencies'), '', 'init');
+  r.case('has bq_graph_detect_cycles', names.includes('bq_graph_detect_cycles'), '', 'init');
 }
 
 r.section('2. Tool: bq_health');
